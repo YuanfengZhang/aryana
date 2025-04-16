@@ -409,69 +409,133 @@ report_alignment_results(global_vars *g, char *buffer, char *cigar[], char *ciga
     return result;
 }
 
-long long
+struct report *
 report_discordant_alignment_results(global_vars *g, char *buffer, char *cigar[], char *cigar2[], bwa_seq_t *seq,
                                     bwa_seq_t *seq2, hash_element *table, hash_element *table2, int *can, int *can2,
-                                    int canNum, int canNum2, penalty_t *penalty, penalty_t *penalty2) {
-    long long result = 0;
-    int i, p, p2, flag;
+                                    int canNum, int canNum2, penalty_t *penalty, penalty_t *penalty2) 
+{
+    // 1. 分配并初始化report结构体
+    struct report *rpt = (struct report*)malloc(sizeof(struct report));
+    if (!rpt) {
+        fprintf(stderr, "[report_discordant] Failed to allocate report struct\n");
+        return NULL;
+    }
+    memset(rpt, 0, sizeof(struct report));
+
+    // 2. 填充基础字段
+    rpt->g = g;
+    rpt->buffer = buffer;  // 使用传入的buffer指针
+    rpt->cigar = cigar;
+    rpt->cigar2 = cigar2;
+    rpt->seq = seq;
+    rpt->seq2 = seq2;
+    rpt->table = table;
+    rpt->table2 = table2;
+    rpt->can = can;
+    rpt->can2 = can2;
+    rpt->canNum = canNum;
+    rpt->canNum2 = canNum2;
+    rpt->penalty = penalty;
+    rpt->penalty2 = penalty2;
+
+    // 3. 生成SAM记录
+    int p = -1, p2 = -1;
+    int flag;
     bwtint_t mate_ind;
     char *mate_cigar;
-    if (canNum) p = rand() % canNum;
-    if (canNum2) p2 = rand() % canNum2;
-// Reporting matches for the first read
+    size_t buffer_used = 0;  // 跟踪buffer使用量
+
+    // 随机选择候选 (需要保护除零错误)
+    if (canNum > 0) p = rand() % canNum;
+    if (canNum2 > 0) p2 = rand() % canNum2;
+
+    // 4. 生成第一条read的SAM记录
     flag = sf_paired | sf_first_mate;
-    if (!canNum2) {
+    if (canNum2 <= 0) {
         flag |= sf_mate_unmapped;
         mate_ind = 0;
-        mate_cigar = 0;
+        mate_cigar = NULL;
     } else {
         mate_ind = table2[can2[p2]].index;
         mate_cigar = cigar2[p2];
     }
-    if (!canNum)
-        result += sam_generator(buffer + result, seq->name, flag | sf_unmapped, 0, 0, 0, mate_ind, mate_cigar, seq->seq,
-                                seq->qual, seq->len, seq2->len, g->bwt, g->offset, g->offInd);
-    else {
-        result += sam_generator(buffer + result, seq->name, flag, penalty[p].mapq, table[can[p]].index, cigar[p],
-                                mate_ind, mate_cigar, seq->seq, seq->qual, seq->len, seq2->len, g->bwt, g->offset,
-                                g->offInd);
+
+    if (canNum <= 0) {
+        buffer_used += sam_generator(buffer + buffer_used, seq->name, 
+                                   flag | sf_unmapped, 0, 0, 0, 
+                                   mate_ind, mate_cigar, seq->seq,
+                                   seq->qual, seq->len, seq2->len, 
+                                   g->bwt, g->offset, g->offInd);
+    } else {
+        buffer_used += sam_generator(buffer + buffer_used, seq->name, flag,
+                                   penalty[p].mapq, table[can[p]].index, cigar[p],
+                                   mate_ind, mate_cigar, seq->seq,
+                                   seq->qual, seq->len, seq2->len,
+                                   g->bwt, g->offset, g->offInd);
+
+        // 处理多重比对
         if (g->args->report_multi) {
             flag |= sf_not_primary;
-            for (i = 0; i < canNum; i++)
-                if (i != p)
-                    result += sam_generator(buffer + result, seq->name, flag, penalty[i].mapq, table[can[i]].index,
-                                            cigar[i], mate_ind, mate_cigar, seq->seq, seq->qual, seq->len, seq2->len,
-                                            g->bwt, g->offset, g->offInd);
+            for (int i = 0; i < canNum; ++i) {
+                if (i != p) {
+                    buffer_used += sam_generator(buffer + buffer_used, seq->name, flag,
+                                               penalty[i].mapq, table[can[i]].index, cigar[i],
+                                               mate_ind, mate_cigar, seq->seq,
+                                               seq->qual, seq->len, seq2->len,
+                                               g->bwt, g->offset, g->offInd);
+                }
+            }
         }
     }
-// Reporting matches for the second read
+
+    // 5. 生成第二条read的SAM记录
     flag = sf_paired | sf_second_mate;
-    if (!canNum) {
+    if (canNum <= 0) {
         flag |= sf_mate_unmapped;
         mate_ind = 0;
-        mate_cigar = 0;
+        mate_cigar = NULL;
     } else {
         mate_ind = table[can[p]].index;
         mate_cigar = cigar[p];
     }
-    if (!canNum2)
-        result += sam_generator(buffer + result, seq2->name, flag | sf_unmapped, 0, 0, 0, mate_ind, mate_cigar,
-                                seq2->seq, seq2->qual, seq2->len, seq->len, g->bwt, g->offset, g->offInd);
-    else {
-        result += sam_generator(buffer + result, seq2->name, flag, penalty2[p2].mapq, table2[can2[p2]].index,
-                                cigar2[p2], mate_ind, mate_cigar, seq2->seq, seq2->qual, seq2->len, seq->len, g->bwt,
-                                g->offset, g->offInd);
+
+    if (canNum2 <= 0) {
+        buffer_used += sam_generator(buffer + buffer_used, seq2->name,
+                                   flag | sf_unmapped, 0, 0, 0,
+                                   mate_ind, mate_cigar, seq2->seq,
+                                   seq2->qual, seq2->len, seq->len,
+                                   g->bwt, g->offset, g->offInd);
+    } else {
+        buffer_used += sam_generator(buffer + buffer_used, seq2->name, flag,
+                                   penalty2[p2].mapq, table2[can2[p2]].index, cigar2[p2],
+                                   mate_ind, mate_cigar, seq2->seq,
+                                   seq2->qual, seq2->len, seq->len,
+                                   g->bwt, g->offset, g->offInd);
+
+        // 处理多重比对
         if (g->args->report_multi) {
             flag |= sf_not_primary;
-            for (i = 0; i < canNum2; i++)
-                if (i != p2)
-                    result += sam_generator(buffer + result, seq2->name, flag, penalty2[i].mapq, table2[can2[i]].index,
-                                            cigar2[i], mate_ind, mate_cigar, seq2->seq, seq2->qual, seq2->len, seq->len,
-                                            g->bwt, g->offset, g->offInd);
+            for (int i = 0; i < canNum2; ++i) {
+                if (i != p2) {
+                    buffer_used += sam_generator(buffer + buffer_used, seq2->name, flag,
+                                               penalty2[i].mapq, table2[can2[i]].index, cigar2[i],
+                                               mate_ind, mate_cigar, seq2->seq,
+                                               seq2->qual, seq2->len, seq->len,
+                                               g->bwt, g->offset, g->offInd);
+                }
+            }
         }
     }
-    return result;
+
+    // 6. 安全终止buffer
+    if (buffer_used < SAM_BUFFER_SIZE) {
+        buffer[buffer_used] = '\0';
+    } else {
+        buffer[SAM_BUFFER_SIZE - 1] = '\0';
+        fprintf(stderr, "[WARNING] SAM buffer overflow\n");
+    }
+
+    return rpt;
 }
 
 // This function aligns one (single or paired) read, finds the best alignment positions, computes the CIGAR sequence, and one or multiple lines of the SAM file for reporting the read alignments
