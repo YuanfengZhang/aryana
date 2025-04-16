@@ -230,17 +230,20 @@ AlnParam aln_param_rd2rd = {1, 19, 19, aln_sm_read, 16, 75};
 AlnParam aln_param_aa2aa = {10, 2, 2, aln_sm_blosum62, 22, 50};
 
 AlnAln *aln_init_AlnAln() {
-    AlnAln *aa;
-    aa = (AlnAln *) malloc(sizeof(AlnAln));
-    aa->path = 0;
-    aa->out1 = aa->out2 = aa->outm = 0;
+    AlnAln *aa = (AlnAln *)calloc(1, sizeof(AlnAln)); // 使用calloc清零初始化
+    if (!aa) return NULL;
+    /* 显式初始化所有指针字段 */
+    aa->path = NULL;
+    aa->cigar32 = NULL;
+    aa->out1 = aa->out2 = aa->outm = NULL;
     aa->path_len = 0;
     return aa;
 }
 
 void aln_free_AlnAln(AlnAln *aa) {
-    free(aa->path);
-    free(aa->cigar32);
+    if (!aa) return;
+    free(aa->path);      // free(NULL)是安全的
+    free(aa->cigar32);   // free(NULL)是安全的
     free(aa->out1);
     free(aa->out2);
     free(aa->outm);
@@ -823,99 +826,127 @@ int aln_local_core(unsigned char *seq1, int len1, unsigned char *seq2, int len2,
 }
 
 AlnAln *aln_stdaln_aux(const char *seq1, const char *seq2, const AlnParam *ap,
-                       int type, int thres, int len1, int len2) {
-    unsigned char *seq11, *seq22;
-    int score;
-    int i, j, l;
-    path_t *p;
-    char *out1, *out2, *outm;
-    AlnAln *aa;
+                       int type, int thres, int len1, int len2) 
+{
+    unsigned char *seq11 = NULL, *seq22 = NULL;
+    AlnAln *aa = NULL;
+    path_t *p = NULL;
 
+    /* 参数校验 */
+    if (!seq1 || !seq2 || !ap) return NULL;
+
+    /* 初始化结构体 */
+    if (!(aa = aln_init_AlnAln())) goto cleanup;
+
+    /* 计算序列长度 */
     if (len1 < 0) len1 = strlen(seq1);
     if (len2 < 0) len2 = strlen(seq2);
+    if (len1 <= 0 || len2 <= 0) goto cleanup;
 
-    aa = aln_init_AlnAln();
-    seq11 = (unsigned char *) malloc(sizeof(unsigned char) * len1);
-    seq22 = (unsigned char *) malloc(sizeof(unsigned char) * len2);
-    aa->path = (path_t *) malloc(sizeof(path_t) * (len1 + len2 + 1));
-
-    if (ap->row < 10) { /* 4-nucleotide alignment */
-        for (i = 0; i < len1; ++i)
-            seq11[i] = aln_nt4_table[(int) seq1[i]];
-        for (j = 0; j < len2; ++j)
-            seq22[j] = aln_nt4_table[(int) seq2[j]];
-    } else if (ap->row < 20) { /* 16-nucleotide alignment */
-        for (i = 0; i < len1; ++i)
-            seq11[i] = aln_nt16_table[(int) seq1[i]];
-        for (j = 0; j < len2; ++j)
-            seq22[j] = aln_nt16_table[(int) seq2[j]];
-    } else { /* amino acids */
-        for (i = 0; i < len1; ++i)
-            seq11[i] = aln_aa_table[(int) seq1[i]];
-        for (j = 0; j < len2; ++j)
-            seq22[j] = aln_aa_table[(int) seq2[j]];
+    /* 分配序列缓存 */
+    if (!(seq11 = malloc(len1))) goto cleanup;
+    if (!(seq22 = malloc(len2))) {
+        free(seq11);
+        goto cleanup;
     }
 
-    if (type == ALN_TYPE_GLOBAL) score = aln_global_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len);
-    else if (type == ALN_TYPE_LOCAL)
-        score = aln_local_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len, thres, &aa->subo);
-    else if (type == ALN_TYPE_EXTEND)
-        score = aln_extend_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len, 1, 0);
-    else {
+    /* 分配路径缓存 */
+    size_t path_size = sizeof(path_t) * (len1 + len2 + 1);
+    if (!(aa->path = (path_t *)malloc(path_size))) {
         free(seq11);
         free(seq22);
-        free(aa->path);
-        aln_free_AlnAln(aa);
-        return 0;
+        goto cleanup;
+    }
+
+    /* 序列转换 */
+    const int row_type = ap->row;
+    for (int i = 0; i < len1; ++i) {
+        if (row_type < 10) seq11[i] = aln_nt4_table[(uint8_t)seq1[i]];
+        else if (row_type < 20) seq11[i] = aln_nt16_table[(uint8_t)seq1[i]];
+        else seq11[i] = aln_aa_table[(uint8_t)seq1[i]];
+    }
+    for (int j = 0; j < len2; ++j) {
+        if (row_type < 10) seq22[j] = aln_nt4_table[(uint8_t)seq2[j]];
+        else if (row_type < 20) seq22[j] = aln_nt16_table[(uint8_t)seq2[j]];
+        else seq22[j] = aln_aa_table[(uint8_t)seq2[j]];
+    }
+
+    /* 执行比对算法 */
+    int score = 0;
+    switch (type) {
+        case ALN_TYPE_GLOBAL:
+            score = aln_global_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len);
+            break;
+        case ALN_TYPE_LOCAL:
+            score = aln_local_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len, thres, &aa->subo);
+            break;
+        case ALN_TYPE_EXTEND:
+            score = aln_extend_core(seq11, len1, seq22, len2, ap, aa->path, &aa->path_len, 1, 0);
+            break;
+        default:
+            goto cleanup;  // 无效类型直接清理
     }
     aa->score = score;
 
+    /* 生成比对可视化结果 */
     if (thres > 0) {
-        out1 = aa->out1 = (char *) malloc(sizeof(char) * (aa->path_len + 1));
-        out2 = aa->out2 = (char *) malloc(sizeof(char) * (aa->path_len + 1));
-        outm = aa->outm = (char *) malloc(sizeof(char) * (aa->path_len + 1));
+        const size_t buf_size = aa->path_len + 1;
+        aa->out1 = malloc(buf_size);
+        aa->out2 = malloc(buf_size);
+        aa->outm = malloc(buf_size);
+        if (!aa->out1 || !aa->out2 || !aa->outm) {
+            free(aa->out1);
+            free(aa->out2);
+            free(aa->outm);
+            aa->out1 = aa->out2 = aa->outm = NULL;
+            goto cleanup; // 部分失败仍返回有效结构体
+        }
 
-        --seq1;
-        --seq2;
-        --seq11;
-        --seq22;
-
+        char *out1 = aa->out1, *out2 = aa->out2, *outm = aa->outm;
         p = aa->path + aa->path_len - 1;
-
-        for (l = 0; p >= aa->path; --p, ++l) {
+        for (int l = 0; p >= aa->path; --p, ++l) {
+            const char c1 = seq1[p->i - 1], c2 = seq2[p->j - 1];
             switch (p->ctype) {
                 case FROM_M:
-                    out1[l] = seq1[p->i];
-                    out2[l] = seq2[p->j];
-                    outm[l] = (seq11[p->i] == seq22[p->j] && seq11[p->i] != ap->row) ? '|' : ' ';
+                    out1[l] = c1;
+                    out2[l] = c2;
+                    outm[l] = (seq11[p->i-1] == seq22[p->j-1]) ? '|' : ' ';
                     break;
                 case FROM_I:
                     out1[l] = '-';
-                    out2[l] = seq2[p->j];
+                    out2[l] = c2;
                     outm[l] = ' ';
                     break;
                 case FROM_D:
-                    out1[l] = seq1[p->i];
+                    out1[l] = c1;
                     out2[l] = '-';
                     outm[l] = ' ';
                     break;
             }
         }
-        out1[l] = out2[l] = outm[l] = '\0';
-        ++seq11;
-        ++seq22;
+        out1[aa->path_len] = out2[aa->path_len] = outm[aa->path_len] = '\0';
     }
 
-    free(seq11);
-    free(seq22);
-
+    /* 生成CIGAR */
     p = aa->path + aa->path_len - 1;
     aa->start1 = p->i ? p->i : 1;
     aa->end1 = aa->path->i;
     aa->start2 = p->j ? p->j : 1;
     aa->end2 = aa->path->j;
-    aa->cigar32 = aln_path2cigar32(aa->path, aa->path_len, &aa->n_cigar);
+    if (!(aa->cigar32 = aln_path2cigar32(aa->path, aa->path_len, &aa->n_cigar))) {
+        goto cleanup; // CIGAR生成失败
+    }
 
+cleanup:
+    /* 清理临时缓存 */
+    free(seq11);
+    free(seq22);
+    
+    /* 错误处理：当关键字段未初始化时释放整个结构体 */
+    if (aa && (!aa->path || !aa->cigar32)) {
+        aln_free_AlnAln(aa);
+        aa = NULL;
+    }
     return aa;
 }
 
