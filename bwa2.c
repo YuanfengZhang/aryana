@@ -63,11 +63,13 @@ struct report {
 };
 
 void free_report(struct report *rpt) {
-    free(rpt->can);
-    free(rpt->can2);
-    free(rpt->penalty);
-    free(rpt->penalty2);
-    free(rpt);//it was reserved for the report struct
+    if (rpt) {
+        free(rpt->can);
+        free(rpt->can2);
+        free(rpt->penalty);
+        free(rpt->penalty2);
+        free(rpt);
+    }
 }
 
 void reverse_seq(bwa_seq_t *seq) {
