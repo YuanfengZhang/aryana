@@ -542,53 +542,92 @@ report_discordant_alignment_results(global_vars *g, char *buffer, char *cigar[],
 // arr and d are the arrays used for smith_waterman dynamic programming. The reason to pass their pointers is to avoid creating them for every read
 struct report *align_read(global_vars *g, char *buffer, char *cigar[], char *cigar2[], bwa_seq_t *seq, bwa_seq_t *seq2,
                           hash_element *table, hash_element *table2, uint64_t level, int **d, unsigned char **arr,
-                          char *tmp_cigar) {
+                          char *tmp_cigar) 
+{
+    // 初始化buffer
+    if (buffer) buffer[0] = '\0';
+    
+    const int candidates_size = g->args->potents;
+    int *candidates = NULL;
+    int *candidates2 = NULL;
+    int *best_candidates = NULL;
+    int *best_candidates2 = NULL;
+    penalty_t *penalty = NULL;
+    penalty_t *penalty2 = NULL;
+    struct report *rpt = NULL;
 
-    buffer[0] = '\0';
-    int candidates_size = g->args->potents;
-    int candidates[candidates_size], candidates2[candidates_size], candidates_num = candidates_size, candidates_num2 = candidates_size;
-    int *best_candidates = malloc(sizeof(int) * candidates_size);
-    int *best_candidates2 = malloc(sizeof(int) * candidates_size);
-    int best_num = 0;
-    int best_num2 = 0;
-    penalty_t *penalty = malloc(sizeof(penalty_t) * candidates_size);
-    penalty_t *penalty2 = malloc(sizeof(penalty_t) * candidates_size);
+    // 1. 分配内存并初始化
+    candidates = malloc(sizeof(int) * candidates_size);
+    if (!candidates) goto cleanup;
+    memset(candidates, -1, sizeof(int) * candidates_size);
 
-    int i = 0;
-    for (i = 0; i < candidates_size; i++) {
-        candidates[i] = -1;
-        cigar[i][0] = 0;
-        if (g->args->paired) {
-            candidates2[i] = -1;
-            cigar2[i][0] = 0;
-        }
-    }
-    //aligner
-    aligner(g->bwt, seq->len, seq->seq, level, table, candidates, candidates_size, &candidates_num, g->args,
-            g->reference);
-    compute_cigar_penalties(g, candidates_num, candidates_size, candidates, cigar, seq, table, d, arr, tmp_cigar,
-                            penalty);
     if (g->args->paired) {
-        aligner(g->bwt, seq2->len, seq2->seq, level, table2, candidates2, candidates_size, &candidates_num2, g->args,
-                g->reference);
-        compute_cigar_penalties(g, candidates_num2, candidates_size, candidates2, cigar2, seq2, table2, d, arr,
-                                tmp_cigar, penalty2);
+        candidates2 = malloc(sizeof(int) * candidates_size);
+        if (!candidates2) goto cleanup;
+        memset(candidates2, -1, sizeof(int) * candidates_size);
     }
-    find_best_candidates(g, candidates_num, candidates_num2, candidates_size, candidates, candidates2, penalty,
-                         penalty2, best_candidates, best_candidates2, &best_num, table, table2, seq->len,
-                         (g->args->paired) ? seq2->len : 0, seq->seq, (g->args->paired) ? seq2->seq : 0, seq->qual,
-                         (g->args->paired) ? seq2->qual : 0, cigar, cigar2, g->args->paired);
-    if (g->args->paired && g->args->discordant && best_num ==
-                                                  0) { // No valid paired alignments but we should report "discordant" alignments: the best alignment for each read of the pair separately
-        find_best_candidates(g, candidates_num, 0, candidates_size, candidates, 0, penalty, 0, best_candidates, 0,
-                             &best_num, table, 0, seq->len, 0, seq->seq, seq2->seq, seq->qual, seq2->qual, cigar, 0, 0);
-        find_best_candidates(g, candidates_num2, 0, candidates_size, candidates2, 0, penalty2, 0, best_candidates2, 0,
-                             &best_num2, table2, 0, seq2->len, 0, seq->seq, seq2->seq, seq->qual, seq2->qual, cigar2, 0,
-                             0);
-        return report_discordant_alignment_results(g, buffer, cigar, cigar2, seq, seq2, table, table2, best_candidates,
-                                                   best_candidates2, best_num, best_num2, penalty, penalty2);
+
+    best_candidates = malloc(sizeof(int) * candidates_size);
+    best_candidates2 = malloc(sizeof(int) * candidates_size);
+    penalty = malloc(sizeof(penalty_t) * candidates_size);
+    penalty2 = malloc(sizeof(penalty_t) * candidates_size);
+    if (!best_candidates || !best_candidates2 || !penalty || !penalty2) {
+        goto cleanup;
     }
-    struct report *rpt = malloc(sizeof(struct report));
+
+    // 2. 初始化cigar数组
+    for (int i = 0; i < candidates_size; i++) {
+        if (cigar[i]) cigar[i][0] = '\0';
+        if (g->args->paired && cigar2[i]) cigar2[i][0] = '\0';
+    }
+
+    // 3. 执行比对
+    int candidates_num = candidates_size;
+    aligner(g->bwt, seq->len, seq->seq, level, table, candidates, candidates_size, &candidates_num, g->args, g->reference);
+    compute_cigar_penalties(g, candidates_num, candidates_size, candidates, cigar, seq, table, d, arr, tmp_cigar, penalty);
+
+    int candidates_num2 = candidates_size;
+    if (g->args->paired) {
+        aligner(g->bwt, seq2->len, seq2->seq, level, table2, candidates2, candidates_size, &candidates_num2, g->args, g->reference);
+        compute_cigar_penalties(g, candidates_num2, candidates_size, candidates2, cigar2, seq2, table2, d, arr, tmp_cigar, penalty2);
+    }
+
+    // 4. 寻找最佳候选
+    int best_num = 0, best_num2 = 0;
+    find_best_candidates(g, candidates_num, candidates_num2, candidates_size, 
+                        candidates, candidates2, penalty, penalty2,
+                        best_candidates, best_candidates2, &best_num, table, table2,
+                        seq->len, (g->args->paired) ? seq2->len : 0,
+                        seq->seq, (g->args->paired) ? seq2->seq : NULL,
+                        seq->qual, (g->args->paired) ? seq2->qual : NULL,
+                        cigar, cigar2, g->args->paired);
+
+    // 5. 处理discordant情况
+    if (g->args->paired && g->args->discordant && best_num == 0) {
+        find_best_candidates(g, candidates_num, 0, candidates_size, candidates, NULL, 
+                            penalty, NULL, best_candidates, NULL, &best_num, 
+                            table, NULL, seq->len, 0, seq->seq, NULL, seq->qual, 
+                            NULL, cigar, NULL, 0);
+        
+        find_best_candidates(g, candidates_num2, 0, candidates_size, candidates2, NULL, 
+                            penalty2, NULL, best_candidates2, NULL, &best_num2, 
+                            table2, NULL, seq2->len, 0, seq2->seq, NULL, seq2->qual, 
+                            NULL, cigar2, NULL, 0);
+
+        rpt = report_discordant_alignment_results(g, buffer, cigar, cigar2, seq, seq2,
+                                                 table, table2, best_candidates, best_candidates2,
+                                                 best_num, best_num2, penalty, penalty2);
+        // 转移内存所有权给report
+        best_candidates = best_candidates2 = NULL;
+        penalty = penalty2 = NULL;
+        goto final_check;
+    }
+
+    // 6. 创建常规report
+    rpt = malloc(sizeof(struct report));
+    if (!rpt) goto cleanup;
+    memset(rpt, 0, sizeof(struct report));
+
     rpt->g = g;
     rpt->buffer = buffer;
     rpt->cigar = cigar;
@@ -603,6 +642,24 @@ struct report *align_read(global_vars *g, char *buffer, char *cigar[], char *cig
     rpt->canNum2 = best_num2;
     rpt->penalty = penalty;
     rpt->penalty2 = penalty2;
+    
+    // 转移内存所有权
+    best_candidates = best_candidates2 = NULL;
+    penalty = penalty2 = NULL;
+
+final_check:
+    if (!rpt) {
+        fprintf(stderr, "[align_read] Failed to generate report\n");
+    }
+    // 7. 清理临时内存
+cleanup:
+    free(candidates);
+    free(candidates2);
+    free(best_candidates);
+    free(best_candidates2);
+    free(penalty);
+    free(penalty2);
+    
     return rpt;
 }
 
