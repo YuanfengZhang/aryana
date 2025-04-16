@@ -242,11 +242,12 @@ AlnAln *aln_init_AlnAln() {
 
 void aln_free_AlnAln(AlnAln *aa) {
     if (!aa) return;
-    free(aa->path);      // free(NULL)是安全的
-    free(aa->cigar32);   // free(NULL)是安全的
+    free(aa->path); // free(NULL)安全
+    free(aa->cigar32);
     free(aa->out1);
     free(aa->out2);
     free(aa->outm);
+    memset(aa, 0, sizeof(AlnAln)); // 防止悬垂指针
     free(aa);
 }
 
@@ -817,11 +818,11 @@ int aln_local_core(unsigned char *seq1, int len1, unsigned char *seq2, int len2,
     /* free */
     free(eh);
     free(suba);
-    for (i = 0; i != N_MATRIX_ROW; ++i) {
-        ++s_array[i];
-        free(s_array[i]);
+    if (s_array) {
+        for (i = 0; i != N_MATRIX_ROW; ++i)
+            free(s_array[i]);
+        free(s_array);
     }
-    free(s_array);
     return score_f;
 }
 
@@ -853,6 +854,7 @@ AlnAln *aln_stdaln_aux(const char *seq1, const char *seq2, const AlnParam *ap,
     /* 分配路径缓存 */
     size_t path_size = sizeof(path_t) * (len1 + len2 + 1);
     if (!(aa->path = (path_t *)malloc(path_size))) {
+        fprintf(stderr, "Failed to allocate path buffer\n");
         free(seq11);
         free(seq22);
         goto cleanup;
@@ -890,6 +892,10 @@ AlnAln *aln_stdaln_aux(const char *seq1, const char *seq2, const AlnParam *ap,
 
     /* 生成比对可视化结果 */
     if (thres > 0) {
+       if (aa->path_len < 0) {
+          fprintf(stderr, "[aln_stdaln_aux] Invalid path length: %d\n", aa->path_len);
+          goto cleanup;
+       }
         const size_t buf_size = aa->path_len + 1;
         aa->out1 = malloc(buf_size);
         aa->out2 = malloc(buf_size);
@@ -905,6 +911,13 @@ AlnAln *aln_stdaln_aux(const char *seq1, const char *seq2, const AlnParam *ap,
         char *out1 = aa->out1, *out2 = aa->out2, *outm = aa->outm;
         p = aa->path + aa->path_len - 1;
         for (int l = 0; p >= aa->path; --p, ++l) {
+           if (l >= buf_size - 1) { // l的范围应为 [0, buf_size-2]
+              fprintf(stderr, "[aln_stdaln_aux] Buffer overflow at index %d (max %zu)\n", 
+                      l, buf_size - 1);
+              // 安全截断并终止循环
+              l = buf_size - 1; 
+              break;
+           }
             const char c1 = seq1[p->i - 1], c2 = seq2[p->j - 1];
             switch (p->ctype) {
                 case FROM_M:
@@ -924,7 +937,15 @@ AlnAln *aln_stdaln_aux(const char *seq1, const char *seq2, const AlnParam *ap,
                     break;
             }
         }
+        const int safe_len = (l < buf_size) ? l : buf_size - 1;
         out1[aa->path_len] = out2[aa->path_len] = outm[aa->path_len] = '\0';
+
+        /* 若路径长度异常，记录警告 */
+        if (l < aa->path_len) {
+           fprintf(stderr, "[aln_stdaln_aux] Truncated alignment output. "
+                           "Original path_len=%d, written=%d\n", 
+              aa->path_len, safe_len);
+        }
     }
 
     /* 生成CIGAR */
@@ -943,9 +964,17 @@ cleanup:
     free(seq22);
     
     /* 错误处理：当关键字段未初始化时释放整个结构体 */
-    if (aa && (!aa->path || !aa->cigar32)) {
-        aln_free_AlnAln(aa);
-        aa = NULL;
+    if (aa) {
+        if (aa->path && aa->cigar32) {
+           if (!aa->out1 || !aa->out2 || !aa->outm) {
+                free(aa->out1);
+                free(aa->out2);
+                free(aa->outm);
+                aa->out1 = aa->out2 = aa->outm = NULL;
+        }
+    } else {
+       aln_free_AlnAln(aa);
+       aa = NULL;
     }
     return aa;
 }
@@ -993,6 +1022,12 @@ int aln_extend_core(unsigned char *seq1, int len1, unsigned char *seq2, int len2
     _p = mem;
     eh = (uint32_t *) _p, _p += 4 * (len1 + 2);
     s_array = calloc(N_MATRIX_ROW, sizeof(void *));
+
+    if (!s_array) {
+        if (!_mem) free(mem);
+        return -1;
+    }
+
     for (i = 0; i != N_MATRIX_ROW; ++i)
         s_array[i] = (int32_t *) _p, _p += 4 * len1;
     /* initialization */
@@ -1138,6 +1173,10 @@ uint32_t *aln_path2cigar32(const path_t *path, int path_len, int *n_cigar) {
     }
     *n_cigar = n;
     cigar = (uint32_t *) malloc(*n_cigar * 4);
+    if (!cigar) {
+        *n_cigar = 0;
+        return NULL;
+    }
 
     cigar[0] = 1u << 4 | path[path_len - 1].ctype;
     last_type = path[path_len - 1].ctype;
