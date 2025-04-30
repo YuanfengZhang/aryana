@@ -4,32 +4,63 @@ if [ "$#" -ne 3 ]; then
     echo "Usage: prepare_genomes.sh <reference genome> <position of CpG islands file> <output folder>"
 	exit
 fi
-DIR=$(dirname $(readlink -f $0));
-mkdir "$3"
-echo "Converting genomes..."
-"$DIR/convert_genomes" -g "$1" -a "$2" -o "$3"
+
+GENOME="$1"
+CPG_F="$2"
+OUTPUT_DIR="$3"
+
+declare -a fa_files=(
+    "${OUTPUT_DIR}/originalGenome.fa"
+    "${OUTPUT_DIR}/BisulfiteGenomeIslandConsideredCT.fa"
+    "${OUTPUT_DIR}/BisulfiteGenomeCompleteCT.fa"
+    "${OUTPUT_DIR}/BisulfiteGenomeIslandConsideredGA.fa"
+    "${OUTPUT_DIR}/BisulfiteGenomeCompleteGA.fa"
+)
+
+timestamp() {
+    date +"%Y-%m-%d %T"
+}
+
+log_start() {
+    echo "[$(timestamp)] START: $1"
+}
+
+log_end() {
+    echo "[$(timestamp)] END: $1"
+}
+
+ARYANA_DIR=$(dirname $(readlink -f $0));
+mkdir -p "${OUTPUT_DIR}"
+log_start "Converting genomes"
+"$ARYANA_DIR/convert_genomes" -g "${GENOME}" -a "${CPG_F}" -o "${OUTPUT_DIR}"
 if [ $? -eq 0 ]; then
-    echo "Converting genomes finished succesfully."
-	echo "Creating index files..."
+    log_end "Converting genomes"
+	log_start "Creating index files"
 else
-    echo "Converting genomes was FAILED. Please check the above errors and run the prepare_genome.sh again after fixing errors."
+    echo "[[$(timestamp)]] Converting genomes was FAILED. Please check the above errors and run the prepare_genome.sh again after fixing errors."
 	exit
 fi
-echo "End of convert_genomes"
-echo "Start of aryana"
-"$DIR/aryana" index "$3/originalGenome.fa" &
-"$DIR/aryana" index "$3/BisulfiteGenomeIslandConsideredCT.fa" &
-#"$DIR/aryana" index "$3/BisulfiteGenomeContextConsideredCT.fa" &
-"$DIR/aryana" index "$3/BisulfiteGenomeCompleteCT.fa" &
-"$DIR/aryana" index "$3/BisulfiteGenomeIslandConsideredGA.fa" &
-#"$DIR/aryana" index "$3/BisulfiteGenomeContextConsideredGA.fa" &
-"$DIR/aryana" index "$3/BisulfiteGenomeCompleteGA.fa" &
-"$DIR/aryana" fa2bin "$3/originalGenome.fa" &
-"$DIR/aryana" fa2bin "$3/BisulfiteGenomeIslandConsideredCT.fa" &
-#"$DIR/aryana" fa2bin "$3/BisulfiteGenomeContextConsideredCT.fa" &
-"$DIR/aryana" fa2bin "$3/BisulfiteGenomeCompleteCT.fa" &
-"$DIR/aryana" fa2bin "$3/BisulfiteGenomeIslandConsideredGA.fa" &
-#"$DIR/aryana" fa2bin "$3/BisulfiteGenomeContextConsideredGA.fa" &
-"$DIR/aryana" fa2bin "$3/BisulfiteGenomeCompleteGA.fa" &
-echo "aryana is running in the background"
-exit
+log_end "End of convert_genomes"
+log_start "Start of aryana"
+
+aryana_steps=("index" "fa2bin")
+for step in "${aryana_steps[@]}"; do
+    log_start "Running aryan $step on genome files"
+    for file in "${fa_files[@]}"; do
+        if [ -f "$file" ]; then
+            log_start "  $step: $(basename "$file")"
+            "$DIR/aryana" "$step" "$file"
+            if [ $? -eq 0 ]; then
+                log_end "  Finished $step: $(basename "$file")"
+            else
+                echo "[$(timestamp)] ERROR: Failed to run aryan $step on $file"
+                exit 1
+            fi
+        else
+            echo "[$(timestamp)] WARNING: File not found (skipped): $file"
+        fi
+    done
+    log_end "Finished aryan $step"
+done
+
+echo "[$(timestamp)] All tasks completed!"
